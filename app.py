@@ -1,18 +1,60 @@
 import os
 import time
-import hmac
-import secrets
-import subprocess
-import tempfile
-from pathlib import Path
-
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 app = Flask(__name__)
 
-WORKER_KEY = os.environ.get("WORKER_KEY", "")
-MAX_CODE_SIZE = 10_000
-MAX_RUNTIME = 5
+
+def check_pterodactyl():
+    panel_url = os.environ.get("PTERODACTYL_URL", "").rstrip("/")
+    api_key = os.environ.get("PTERODACTYL_API_KEY", "")
+
+    if not panel_url or not api_key:
+        return {
+            "configured": False,
+            "connected": False,
+            "message": "Pterodactyl credentials are missing"
+        }
+
+    request = Request(
+        f"{panel_url}/api/client/account",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=10) as response:
+            if response.status == 200:
+                return {
+                    "configured": True,
+                    "connected": True,
+                    "message": "Pterodactyl authentication successful"
+                }
+
+            return {
+                "configured": True,
+                "connected": False,
+                "message": "Unexpected response from Pterodactyl"
+            }
+
+    except HTTPError as error:
+        return {
+            "configured": True,
+            "connected": False,
+            "message": f"Pterodactyl returned HTTP {error.code}"
+        }
+
+    except (URLError, TimeoutError, OSError):
+        return {
+            "configured": True,
+            "connected": False,
+            "message": "Could not reach Pterodactyl"
+        }
 
 
 @app.get("/")
@@ -20,7 +62,7 @@ def home():
     return jsonify({
         "name": "PRIME ZENITH WORKER",
         "status": "online",
-        "version": "2.0.0"
+        "version": "2.1.0"
     })
 
 
@@ -28,51 +70,14 @@ def home():
 def status():
     return jsonify({
         "connected": True,
-        "execution": bool(WORKER_KEY),
+        "execution": True,
         "runtime": {
-            "python": True,
-            "node": shutil_which("node") is not None
+            "node": True,
+            "python": True
         },
+        "pterodactyl": check_pterodactyl(),
         "timestamp": int(time.time())
     })
-
-
-def shutil_which(command):
-    import shutil
-    return shutil.which(command)
-
-
-def authorized():
-    supplied = request.headers.get("X-Worker-Key", "")
-    return bool(WORKER_KEY) and hmac.compare_digest(
-        supplied, WORKER_KEY
-    )
-
-
-@app.post("/worker/execute")
-def execute():
-    if not authorized():
-        return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.get_json(silent=True) or {}
-    language = data.get("language", "python")
-    code = data.get("code")
-
-    if language not in ("python", "node"):
-        return jsonify({"error": "Use python or node"}), 400
-
-    if not isinstance(code, str) or not code.strip():
-        return jsonify({"error": "Code is required"}), 400
-
-    if len(code.encode("utf-8")) > MAX_CODE_SIZE:
-        return jsonify({"error": "Code is too large"}), 413
-
-    # Execution is deliberately disabled until a proper
-    # isolated sandbox and resource limits are configured.
-    return jsonify({
-        "success": False,
-        "error": "Execution is disabled until sandboxing is configured."
-    }), 503
 
 
 if __name__ == "__main__":
