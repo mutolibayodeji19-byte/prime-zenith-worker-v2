@@ -53,7 +53,16 @@ def ptero_request(path, method="GET", payload=None):
                 return {}, response.status, None
 
     except HTTPError as exc:
-        return None, exc.code, "Pterodactyl API request failed"
+    try:
+        details = exc.read().decode("utf-8", errors="replace")[:500]
+    except Exception:
+        details = ""
+
+    message = f"Pterodactyl returned HTTP {exc.code}"
+    if details:
+        message += f": {details}"
+
+    return None, exc.code, message
 
     except (URLError, TimeoutError, OSError):
         return None, 502, "Could not reach Pterodactyl"
