@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 app = Flask(__name__)
-WORKER_VERSION = "2.3.0"
+WORKER_VERSION = "2.3.1"
 
 
 def worker_authorized():
