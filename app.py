@@ -1,123 +1,60 @@
 import os
 import time
+import json
 
 from flask import Flask, jsonify
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-
 app = Flask(__name__)
+WORKER_VERSION = "2.2.0"
 
-WORKER_VERSION = "2.1.1"
 
+def ptero_request(path):
+    panel = os.environ.get("PTERODACTYL_URL", "").strip().rstrip("/")
+    key = os.environ.get("PTERODACTYL_API_KEY", "").strip()
 
-def check_pterodactyl():
-    """
-    Check whether the worker can authenticate
-    with the Pterodactyl Client API.
-    """
+    if not panel or not key:
+        return None, 0, "Pterodactyl environment variables are missing"
 
-    panel_url = os.environ.get(
-        "PTERODACTYL_URL", ""
-    ).strip().rstrip("/")
-
-    api_key = os.environ.get(
-        "PTERODACTYL_API_KEY", ""
-    ).strip()
-
-    if not panel_url or not api_key:
-        return {
-            "configured": False,
-            "connected": False,
-            "message": "Required environment variables are missing"
-        }
-
-    if not panel_url.startswith("https://"):
-        return {
-            "configured": True,
-            "connected": False,
-            "message": "Panel URL must use HTTPS"
-        }
-
-    endpoint = f"{panel_url}/api/client/account"
+    if not panel.startswith("https://"):
+        return None, 0, "Panel URL must use HTTPS"
 
     request = Request(
-        endpoint,
+        panel + path,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {key}",
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "PRIME-ZENITH-WORKER/2.1.1"
+            "User-Agent": f"PRIME-ZENITH-WORKER/{WORKER_VERSION}",
         },
-        method="GET"
     )
 
     try:
         with urlopen(request, timeout=15) as response:
-            status_code = response.status
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}, response.status, None
+    except HTTPError as exc:
+        return None, exc.code, "Pterodactyl API request failed"
+    except (URLError, TimeoutError, OSError):
+        return None, 0, "Could not reach Pterodactyl"
+    except (ValueError, json.JSONDecodeError):
+        return None, 0, "Invalid response from Pterodactyl"
 
-            if status_code == 200:
-                return {
-                    "configured": True,
-                    "connected": True,
-                    "http_status": 200,
-                    "message": "Pterodactyl API authentication successful"
-                }
 
-            return {
-                "configured": True,
-                "connected": False,
-                "http_status": status_code,
-                "message": "Unexpected response from Pterodactyl"
-            }
+def check_pterodactyl():
+    data, status, error = ptero_request("/api/client/account")
 
-    except HTTPError as error:
-        # Read a short error message for troubleshooting.
-        try:
-            response_body = error.read(512).decode(
-                "utf-8", errors="replace"
-            )
-
-            # Avoid returning a potentially large HTML page.
-            details = " ".join(response_body.split())[:200]
-
-        except Exception:
-            details = "No response details available"
-
-        return {
-            "configured": True,
-            "connected": False,
-            "http_status": error.code,
-            "message": "Pterodactyl rejected the request",
-            "details": details
-        }
-
-    except (URLError, TimeoutError, OSError) as error:
-        reason = getattr(error, "reason", None)
-
-        if isinstance(reason, TimeoutError):
-            message = "Pterodactyl connection timed out"
-        elif isinstance(error, TimeoutError):
-            message = "Pterodactyl connection timed out"
-        else:
-            message = "Could not reach Pterodactyl"
-
-        return {
-            "configured": True,
-            "connected": False,
-            "message": message
-        }
-
-    except Exception:
-        app.logger.exception(
-            "Unexpected Pterodactyl connection error"
-        )
-
-        return {
-            "configured": True,
-            "connected": False,
-            "message": "Unexpected connection error"
-        }
+    return {
+        "configured": status != 0 or bool(
+            os.environ.get("PTERODACTYL_URL")
+            and os.environ.get("PTERODACTYL_API_KEY")
+        ),
+        "connected": status == 200,
+        "http_status": status or None,
+        "message": "Pterodactyl API authentication successful"
+        if status == 200 else error,
+    }
 
 
 @app.get("/")
@@ -125,7 +62,7 @@ def home():
     return jsonify({
         "name": "PRIME ZENITH WORKER",
         "status": "online",
-        "version": WORKER_VERSION
+        "version": WORKER_VERSION,
     })
 
 
@@ -134,30 +71,56 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "PRIME ZENITH WORKER",
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
     })
 
 
 @app.get("/worker/status")
 def worker_status():
-    pterodactyl = check_pterodactyl()
-
     return jsonify({
         "connected": True,
         "execution": True,
-        "runtime": {
-            "node": True,
-            "python": True
-        },
-        "pterodactyl": pterodactyl,
-        "timestamp": int(time.time())
+        "runtime": {"node": True, "python": True},
+        "pterodactyl": check_pterodactyl(),
+        "timestamp": int(time.time()),
     })
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+@app.get("/worker/servers")
+def list_servers():
+    # This read-only diagnostic endpoint must not expose server details publicly.
+    expected = os.environ.get("WORKER_KEY", "").strip()
+    supplied = __import__("flask").request.headers.get(
+        "X-Worker-Key", ""
+    ).strip()
 
+    if not expected or supplied != expected:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data, status, error = ptero_request("/api/client")
+
+    if status != 200 or not isinstance(data, dict):
+        return jsonify({
+            "error": error or "Could not retrieve servers",
+            "http_status": status,
+        }), 502
+
+    servers = []
+    for item in data.get("data", []):
+        attrs = item.get("attributes", {})
+        servers.append({
+            "identifier": attrs.get("identifier"),
+            "name": attrs.get("name"),
+            "status": attrs.get("status", "unknown"),
+            "suspended": attrs.get("is_suspended", False),
+            "installing": attrs.get("is_installing", False),
+        })
+
+    return jsonify({"count": len(servers), "servers": servers})
+
+
+if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=port
-    )
+        port=int(os.environ.get("PORT", 10000)),
+        )
