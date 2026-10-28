@@ -43,11 +43,18 @@ def check_pterodactyl():
             }
 
     except HTTPError as error:
-        return {
-            "configured": True,
-            "connected": False,
-            "message": f"Pterodactyl returned HTTP {error.code}"
-        }
+    try:
+        details = error.read().decode("utf-8", errors="replace")[:300]
+    except Exception:
+        details = "No response details available"
+
+    return {
+        "configured": True,
+        "connected": False,
+        "http_status": error.code,
+        "message": "Pterodactyl rejected the request",
+        "details": details
+    }
 
     except (URLError, TimeoutError, OSError):
         return {
